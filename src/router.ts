@@ -77,6 +77,20 @@ function endpointUrl(opts: McpAuthRouterOptions, path: string): URL {
   return new URL(path.replace(/^\//, ''), base.toString().replace(/\/?$/, '/'))
 }
 
+/** Canonical issuer string. RFC 8414 §2 wants no trailing slash when
+ *  the issuer URL has no path component — many validators (notably the
+ *  Anthropic MCP connector backend) string-compare the issuer they
+ *  derived from the user-supplied URL against the one we publish, and a
+ *  bare `https://host/` vs `https://host` mismatch is fatal. We strip
+ *  the trailing slash iff the path is just "/". */
+function canonicalIssuer(url: URL): string {
+  const href = url.href
+  if (url.pathname === '/' && !url.search && !url.hash) {
+    return href.replace(/\/$/, '')
+  }
+  return href
+}
+
 /** Build the AS metadata document. Field order matches the SDK so
  *  string-comparing clients see the same bytes. */
 export function buildAuthorizationServerMetadata(
@@ -87,16 +101,23 @@ export function buildAuthorizationServerMetadata(
   const hasRevocation = !!opts.provider.revokeToken
 
   const md: OAuthMetadata = {
-    // RFC 8414 §2: issuer is the canonical URL of the AS, no trailing
-    // slash unless the URL inherently has one. We use URL.href, which
-    // preserves the user's chosen trailing-slash convention.
-    issuer: opts.issuerUrl.href,
+    // RFC 8414 §2: issuer is the canonical URL of the AS. We strip the
+    // trailing slash for bare-host issuers (path === "/") because the
+    // Anthropic MCP connector backend (and other strict validators)
+    // compare the issuer string-eq against the URL the user typed in;
+    // they don't normalize trailing slashes. See canonicalIssuer().
+    issuer: canonicalIssuer(opts.issuerUrl),
     authorization_endpoint: endpointUrl(
       opts,
       opts.paths?.authorization ?? '/authorize',
     ).href,
     token_endpoint: endpointUrl(opts, opts.paths?.token ?? '/token').href,
     response_types_supported: ['code'],
+    // RFC 6749 §3.1.2 defines `query` as the default response_mode for
+    // the code grant; including it explicitly mirrors what real
+    // Anthropic-blessed MCP servers (e.g. Cloudflare's bindings.mcp)
+    // emit, and some validators key off it.
+    response_modes_supported: ['query'],
     grant_types_supported: grantTypes,
     code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: [
@@ -132,8 +153,12 @@ export function buildProtectedResourceMetadata(
 ): OAuthProtectedResourceMetadata {
   const resource = opts.resourceUrl ?? opts.issuerUrl
   return {
-    resource: resource.href,
-    authorization_servers: [opts.issuerUrl.href],
+    // `resource` keeps any path component verbatim — for MCP it's the
+    // /api/mcp endpoint, no normalization. authorization_servers must
+    // match the AS's `issuer` byte-for-byte so we run it through the
+    // same canonical form.
+    resource: resource.href.replace(/\/$/, resource.pathname === '/' ? '' : '/'),
+    authorization_servers: [canonicalIssuer(opts.issuerUrl)],
     scopes_supported: opts.scopesSupported,
     bearer_methods_supported: opts.bearerMethodsSupported ?? ['header'],
   }

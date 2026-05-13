@@ -125,6 +125,31 @@ function buildApp() {
 
 // ---- tests ----------------------------------------------------------
 
+// Regression: strict OAuth clients (e.g. Anthropic's MCP connector
+// backend) compare the issuer they derived from the user-typed URL
+// against what we publish, byte-for-byte. A trailing slash mismatch
+// is fatal. Verify the canonical form strips the slash for bare hosts
+// and preserves it for paths.
+describe('issuer canonicalization (RFC 8414 §2)', () => {
+  test('bare-host issuer has no trailing slash', async () => {
+    const provider = makeProvider()
+    const app = new Hono()
+    app.route('/', mcpAuthRouter({ provider, issuerUrl: new URL('https://h.example') }))
+    const md = await appReqJson<any>(app, '/.well-known/oauth-authorization-server')
+    expect(md.issuer).toBe('https://h.example')
+  })
+  test('issuer with a non-root path preserves trailing slash semantics', async () => {
+    const provider = makeProvider()
+    const app = new Hono()
+    app.route(
+      '/',
+      mcpAuthRouter({ provider, issuerUrl: new URL('https://h.example/tenant/') }),
+    )
+    const md = await appReqJson<any>(app, '/.well-known/oauth-authorization-server')
+    expect(md.issuer).toBe('https://h.example/tenant/')
+  })
+})
+
 describe('AS metadata', () => {
   test('returns RFC 8414 fields with correct content-type', async () => {
     const { app } = buildApp()
@@ -133,8 +158,10 @@ describe('AS metadata', () => {
     expect(res.headers.get('content-type')).toBe('application/json')
     expect(res.headers.get('access-control-allow-origin')).toBe('*')
     const body = (await res.json()) as any
-    expect(body.issuer).toBe('https://example.test/')
+    // RFC 8414 canonical issuer — no trailing slash for bare hosts.
+    expect(body.issuer).toBe('https://example.test')
     expect(body.authorization_endpoint).toBe('https://example.test/authorize')
+    expect(body.response_modes_supported).toEqual(['query'])
     expect(body.token_endpoint).toBe('https://example.test/token')
     expect(body.registration_endpoint).toBe('https://example.test/register')
     expect(body.revocation_endpoint).toBe('https://example.test/revoke')
@@ -167,8 +194,10 @@ describe('PRM', () => {
     const res = await app.request('/.well-known/oauth-protected-resource')
     expect(res.status).toBe(200)
     const body = (await res.json()) as any
-    expect(body.resource).toBe('https://example.test/')
-    expect(body.authorization_servers).toEqual(['https://example.test/'])
+    // For bare-host resource (no /api/mcp path), the canonical form
+    // strips the trailing slash.
+    expect(body.resource).toBe('https://example.test')
+    expect(body.authorization_servers).toEqual(['https://example.test'])
     expect(body.bearer_methods_supported).toEqual(['header'])
   })
 })
